@@ -1,0 +1,715 @@
+local replicated = game.ReplicatedStorage
+local pathModule = require(script.Path)
+local activePowerups = require(replicated.Modules.ActivePowerups)
+local inventory = require(replicated.Modules.Inventory)
+local npcStorage = replicated.NPCs
+local visualEvent = replicated.Events.VisualEvent
+local powerupEvent = replicated.Events.Powerup
+local weaponEvent = replicated.Events.WeaponEvent
+local respawnConnection
+local npcFolder = workspace:FindFirstChild("NPCs") or Instance.new("Folder", workspace)
+npcFolder.Name = "NPCs"
+local ragdollFolder = Instance.new("Folder", workspace)
+ragdollFolder.Name = "RagdollFolder"
+local powerupFolder = Instance.new("Folder", workspace)
+powerupFolder.Name = "PowerupFolder"
+local npcTable = {}
+
+local gameDataFolder = Instance.new("Folder", game.ReplicatedStorage)
+gameDataFolder.Name = "GameData"
+
+local roundsValue = Instance.new("IntValue", gameDataFolder)
+roundsValue.Name = "Round"
+
+local zombieHealth = 150
+local zombieSpawnDelay = 2
+local amntNeededToKill = 1
+local amntKilled = 0
+local zombieSpeed = 8
+
+local maxDropsPerRound = 0
+local dropsUsed = 0
+
+local nextRound
+
+local r6BodyParts = {"Head", "HumanoidRootPart", "Left Arm", "Right Arm", "Left Leg", "Right Leg", "Torso"}
+
+local attachmentCFrames = {
+	["Neck"] = {CFrame.new(0, 1, 0, 0, -1, 0, 1, 0, -0, 0, 0, 1), CFrame.new(0, -0.5, 0, 0, -1, 0, 1, 0, -0, 0, 0, 1)},
+	["Left Shoulder"] = {CFrame.new(-1.3, 0.75, 0, -1, 0, 0, 0, -1, 0, 0, 0, 1), CFrame.new(0.2, 0.75, 0, -1, 0, 0, 0, -1, 0, 0, 0, 1)},
+	["Right Shoulder"] = {CFrame.new(1.3, 0.75, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1), CFrame.new(-0.2, 0.75, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1)},
+	["Left Hip"] = {CFrame.new(-0.5, -1, 0, 0, 1, -0, -1, 0, 0, 0, 0, 1), CFrame.new(0, 1, 0, 0, 1, -0, -1, 0, 0, 0, 0, 1)},
+	["Right Hip"] = {CFrame.new(0.5, -1, 0, 0, 1, -0, -1, 0, 0, 0, 0, 1), CFrame.new(0, 1, 0, 0, 1, -0, -1, 0, 0, 0, 0, 1)},
+}
+
+local ragdollInstanceNames = {
+	["RagdollAttachment"] = true,
+	["RagdollConstraint"] = true,
+	["ColliderPart"] = true,
+}
+
+local function GetRandomChild(parent)
+	local children = parent:GetChildren()
+	return children[math.random(1,#children)]
+end
+
+
+
+local function playSound(sound:Sound, cf)
+	local partClone = game.ReplicatedStorage.WeaponData.HoleTemplate:Clone()
+	partClone.Parent = workspace
+	partClone.CFrame = cf
+	local soundClone = sound:Clone()
+	soundClone.Parent = partClone
+	soundClone:Play()
+	task.delay(soundClone.TimeLength, function()
+		partClone:Destroy()
+	end)
+end
+
+local function isR6BodyPart(partName)
+	for _, bodyPart in ipairs(r6BodyParts) do
+		if partName == bodyPart then
+			return true
+		end
+	end
+	return false
+end
+
+for _, folder in pairs(npcStorage:GetChildren()) do
+	for _, item in pairs(folder:GetChildren()) do
+		item.Humanoid.BreakJointsOnDeath = false
+		for i,v in pairs(item:GetDescendants()) do
+			if v:IsA("BasePart") then
+				if not isR6BodyPart(v.Name) then
+					v.CanCollide = false
+					v.CanQuery = false
+					v.CanTouch = false
+				end
+				if v.Name == "HumanoidRootPart" then
+					v.CanCollide = false
+					v.CanQuery = false
+				end
+			end
+		end
+	end
+end
+
+local function createColliderPart(part: BasePart)
+	if not part then return end
+	local rp = Instance.new("Part")
+	rp.Name = "ColliderPart"
+	rp.Size = part.Size/1.7
+	rp.Massless = true			
+	rp.CFrame = part.CFrame
+	rp.Transparency = 1
+
+	local wc = Instance.new("WeldConstraint")
+	wc.Part0 = rp
+	wc.Part1 = part
+
+	wc.Parent = rp
+	rp.Parent = part
+end
+
+
+
+function replaceJoints(Character)
+	for _, motor: Motor6D in pairs(Character:GetDescendants()) do
+		if motor:IsA("Motor6D") then
+			if not attachmentCFrames[motor.Name] then return end
+			motor.Enabled = false;
+			local a0, a1 = Instance.new("Attachment"), Instance.new("Attachment")
+			a0.CFrame = attachmentCFrames[motor.Name][1]
+			a1.CFrame = attachmentCFrames[motor.Name][2]
+
+			a0.Name = "RagdollAttachment"
+			a1.Name = "RagdollAttachment"
+
+			createColliderPart(motor.Part1)
+
+			local b = Instance.new("BallSocketConstraint")
+			b.Attachment0 = a0
+			b.Attachment1 = a1
+			b.Name = "RagdollConstraint"
+
+			b.Radius = 0.15
+			b.LimitsEnabled = true
+			b.TwistLimitsEnabled = false
+			b.MaxFrictionTorque = 0
+			b.Restitution = 0
+			b.UpperAngle = 90
+			b.TwistLowerAngle = -45
+			b.TwistUpperAngle = 45
+
+			if motor.Name == "Neck" then
+				b.TwistLimitsEnabled = true
+				b.UpperAngle = 45
+				b.TwistLowerAngle = -70
+				b.TwistUpperAngle = 70
+			end
+
+			a0.Parent = motor.Part0
+			a1.Parent = motor.Part1
+			b.Parent = motor.Parent
+		end
+	end
+end
+
+local function setServerOwner(model: Model)
+	for i,v in pairs(model:GetDescendants()) do
+		if v:IsA("BasePart") then
+			v:SetNetworkOwner(nil)
+		end
+	end
+end
+
+local function Ragdoll(originalChar)
+	local Character = originalChar:Clone()
+	Character.Parent = ragdollFolder
+
+	for _, v in pairs(Character:GetDescendants()) do
+		if v:IsA("BasePart") then
+			v.CollisionGroup = "Ragdolls"
+		end
+	end
+
+	local Torso: BasePart = Character:WaitForChild("Torso")
+	local Humanoid: Humanoid = Character:FindFirstChildOfClass("Humanoid")
+
+	-- 🔧 Stop Humanoid from trying to get back up or control itself
+	Humanoid.BreakJointsOnDeath = false
+	Humanoid.RequiresNeck = false
+	Humanoid.PlatformStand = true
+	Humanoid.AutoRotate = false
+
+	-- 🔧 Disable humanoid state changes entirely
+	local statesToDisable = {
+		GettingUp = true,
+		Seated = true,
+		Climbing = true,
+		FallingDown = true,
+		Running = true,
+		RunningNoPhysics = true,
+		Jumping = true,
+		Landed = true
+	}
+
+	for stateName,_ in pairs(statesToDisable) do
+		Humanoid:SetStateEnabled(Enum.HumanoidStateType[stateName], false)
+	end
+
+
+	-- Force physics state and stop any scripts fighting it
+	Humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+
+	-- Replace Motor6Ds with physics joints (your function)
+	replaceJoints(Character)
+
+	-- Small impulse just for realism
+	Torso:ApplyImpulse(Torso.CFrame.LookVector * 100)
+
+	-- 💀 [RAGDOLL] Adjust collision and cleanup
+	for _, part in pairs(Character:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.CanCollide = false -- prevent blocking
+			part.Massless = false    -- keep gravity
+			part.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.3, 0.5)
+		end
+	end
+
+	-- 🕒 Wait a few seconds before removing ragdoll
+	task.delay(5, function()
+		if Character and Character.Parent then
+			print("🧟 [RAGDOLL] Cleaned up after 5 seconds:", Character.Name)
+			Character:Destroy()
+		end
+	end)
+end
+
+
+local function destroyNPC(npc)
+	amntKilled += 1
+	if amntKilled >= amntNeededToKill then
+		
+		-- 🔊 [DEBUG] Attempting to play Round End sound
+		local sound = game.Workspace:FindFirstChild("Damned") and game.Workspace.Damned:FindFirstChild("GameAudio") and game.Workspace.Damned.GameAudio:FindFirstChild("RoundEnd")
+		if sound then
+			local soundClone = sound:Clone()
+			soundClone.Parent = workspace
+			soundClone:Play()
+			print("[ROUND END SOUND] Playing:", soundClone.Name, " | Duration:", soundClone.TimeLength)
+			task.delay(soundClone.TimeLength, function()
+				if soundClone then
+					soundClone:Destroy()
+					print("[ROUND END SOUND] Destroyed clone")
+				end
+			end)
+		else
+			warn("[ROUND END SOUND] RoundEnd sound not found in workspace.Damned.GameAudio")
+		end
+
+		nextRound()
+	end
+	Ragdoll(npc)
+
+	for _, part in pairs(npc:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.CanCollide = false
+		end
+	end
+
+	npcTable[npc] = nil
+	npc:Destroy()
+end
+
+local function killAllNPC()
+	for i,v in pairs(npcTable) do
+		destroyNPC(i)
+	end
+end
+
+local function bonusPoints()
+	local increase = math.random(100,300)
+	for i,v in pairs(game.Players:GetChildren()) do
+		v:SetAttribute("Score", v:GetAttribute("Score")+increase)
+	end
+end
+
+local function maxAmmo()
+	for player,weapons in pairs(inventory) do
+		for i,v in pairs(weapons) do
+			if type(v) ~= "string" then
+				for weaponName, weaponDetails in pairs(v) do
+					weaponDetails["StoredAmmo"] = replicated.Weapons:FindFirstChild(weaponName).Configuration.StoredAmmo.Value
+					weaponEvent:FireClient(game.Players:FindFirstChild(player), "UpdateInventory", inventory[player])
+				end
+			end
+		end
+	end
+end
+
+local function addToActivePowerups(name)
+	table.insert(activePowerups, name)
+	task.delay(30, function()
+		local pos = table.find(activePowerups, name)
+		table.remove(activePowerups, pos)
+	end)
+end
+
+local function dropPowerup(cf)
+	local used = false
+	local powerup = GetRandomChild(replicated.drops):Clone()
+	local powerupName = powerup.Name
+	powerup.Parent = workspace
+	powerup.CFrame = cf
+	local sound = game.SoundService.PowerupLoop:Clone()
+	sound.Looped = true
+	sound.Parent = powerup
+	sound:Play()
+	playSound(game.SoundService.PowerupSpawn, cf)
+	powerup.Touched:Connect(function(part)
+		local humanoid = part.Parent:FindFirstChild("Humanoid")
+		local plr = false
+		if humanoid then
+			plr = game.Players:FindFirstChild(part.Parent.Name)
+		end
+		if used == false and humanoid and plr then
+			used = true
+			powerupEvent:FireAllClients(powerupName)
+			playSound(powerup.Grab or game.SoundService.PowerupGrab, cf)
+			if powerupName == "bonusPoints" then
+				bonusPoints()
+			end
+
+			if powerupName == "nuke" then
+				killAllNPC()
+			end
+			
+			if powerupName == "maxAmmo" then
+				maxAmmo()
+			end
+			
+			if powerupName == "instaKill" then
+				addToActivePowerups("instaKill")
+			end
+			
+			if powerupName == "doublePoints" then
+				addToActivePowerups("doublePoints")
+			end
+			
+			powerup:Destroy()
+		end
+	end)
+end
+
+local function GetAmountOfZombies()
+	local playersAmnt = #game.Players:GetChildren()
+	local R = roundsValue.Value
+	local amnt = 0
+	if playersAmnt == 1 then
+		amnt = 0.000058 * R^3 + 0.074032 * R^2 + 0.718119 * R + 14.738699
+	end
+	if playersAmnt == 2 then
+		amnt = 0.000054 * R^3 + 0.169717 * R^2 + 0.541627 *R + 15.917041
+	end
+	if playersAmnt == 3 then
+		amnt = 0.000169 * R^3 + 0.238079 * R^2 + 1.307276 *R + 21.291046
+	end
+	if playersAmnt == 4 then
+		amnt = 0.000225 * R^3 + 0.314314 * R^2 + 1.835712 *R + 27.596132
+	end
+	return math.floor(amnt)
+end
+
+local function SpawnNPC(model, cframe, setting)
+	local npc = model:Clone()
+	local boundingBox = npc:GetBoundingBox()
+	npc:PivotTo(cframe)
+	
+	local Path = pathModule.new(npc, {AgentCanJump = false})
+	setting.path = Path
+	
+	npc.Humanoid.MaxHealth = setting.health
+	npc.Humanoid.Health = setting.health
+	npc.Humanoid.WalkSpeed = zombieSpeed
+	
+	local function rerunPath()
+		if not npc.Parent or not npcTable[npc] then return end
+		local chasing = npcTable[npc].chasingCharacter
+		if chasing and chasing:FindFirstChild("HumanoidRootPart") then
+			Path:Run(chasing.HumanoidRootPart)
+		end
+	end
+
+	Path.Blocked:Connect(rerunPath)
+	
+	Path.WaypointReached:Connect(rerunPath)
+	
+	Path.Error:Connect(rerunPath)
+	
+	Path.Reached:Connect(rerunPath)
+	
+	npcTable[npc] = setting
+	npc.Parent = npcFolder
+	
+	setServerOwner(npc)
+	
+	local animations = npc.Animations
+	local animator = npc.Humanoid.Animator
+	setting.animations.AttackAnimations = {}
+	for i,v in pairs(animations.Attack:GetChildren()) do
+		local anim = animator:LoadAnimation(v)
+		anim.Priority = Enum.AnimationPriority.Movement
+		anim.Looped = false
+		table.insert(setting.animations.AttackAnimations, anim)
+	end
+	setting.animations.WalkAnimations = {}
+	for i,v in pairs(animations.Walk:GetChildren()) do
+		local anim = animator:LoadAnimation(v)
+		anim.Priority = Enum.AnimationPriority.Movement
+		anim.Looped = true
+		table.insert(setting.animations.WalkAnimations, anim)
+	end
+	
+	setting.animations.WalkAnimations[math.random(1, #setting.animations.WalkAnimations)]:Play()
+	
+	npc.Humanoid.Died:Connect(function()
+		if dropsUsed < maxDropsPerRound then
+			local num = math.random(1,10)
+			if num == 1 then
+				dropsUsed += 1
+				dropPowerup(npc.HumanoidRootPart.CFrame)
+			end
+		end
+		
+		destroyNPC(npc)
+	end)
+	
+	task.spawn(function()
+		local lastClone = nil
+		local waitTime = 0
+		while wait(waitTime) do
+			if not npc or not npc.Parent then
+				break
+			end
+			if lastClone then
+				lastClone:Destroy()
+			end
+			local sound = GetRandomChild(npc.Sounds.Chase)
+			local clone = sound:Clone()
+			clone.Parent = npc.HumanoidRootPart
+			clone:Play()
+			lastClone = clone
+			waitTime = sound.TimeLength
+		end
+	end)
+end
+
+function nextRound()
+	dropsUsed = 0
+	amntKilled = 0
+	roundsValue.Value += 1
+	print("🔄 [ROUND] Starting Round:", roundsValue.Value)
+	print("💀 [ROUND] Zombies to spawn this round:", GetAmountOfZombies())
+	print("❤️ [ROUND] Zombie Health:", zombieHealth)
+	print("⏱️ [ROUND] Spawn Delay:", zombieSpawnDelay)
+
+	-- 🔊 [DEBUG] Attempting to play Round Start sound
+	local sound = game.Workspace:FindFirstChild("Damned") and game.Workspace.Damned:FindFirstChild("GameAudio") and game.Workspace.Damned.GameAudio.RoundAudio:FindFirstChild("RoundStart")
+	if sound then
+		local soundClone = sound:Clone()
+		soundClone.Parent = workspace
+		soundClone:Play()
+		task.delay(soundClone.TimeLength, function()
+			if soundClone then
+				soundClone:Destroy()
+			end
+		end)
+	else
+		warn("[ROUND START SOUND] RoundStart sound not found in workspace.Damned.GameAudio")
+	end
+
+	zombieSpawnDelay *= 0.95
+	zombieSpawnDelay = math.clamp(zombieSpawnDelay, 0.08, 99)
+	local zombiesAmnt = GetAmountOfZombies()
+	amntNeededToKill = zombiesAmnt
+	if zombieHealth < 950 then
+		zombieHealth += 100
+	else
+		zombieHealth *= 1.1
+	end
+	
+	respawnConnection = coroutine.create(function()
+		for i = zombiesAmnt, 1, -1 do
+			task.wait(zombieSpawnDelay)
+			local ZombieDefaultSettings = {
+				attackRange = 7,
+				attackDelay = 1,
+				damage = 10,
+				health = zombieHealth,
+				chasingCharacter = nil,
+				attackDB = false,
+				path = nil,
+				animations = {}
+			}
+			local zombie = GetRandomChild(npcStorage.Normal)
+			SpawnNPC(zombie, GetRandomChild(workspace.Damned.ZombieSpawns).CFrame, ZombieDefaultSettings)
+		end
+	end)
+	
+	coroutine.resume(respawnConnection)
+end
+
+local function FindClosestCharacter(npc)
+	local closestDistance = math.huge
+	local closestCharacter = nil
+	local npcHRP = npc.HumanoidRootPart
+	for _, player in pairs(game.Players:GetChildren()) do
+		local character = game.Workspace:FindFirstChild(player.Name)
+
+		if character then
+			local distance = (character.HumanoidRootPart.Position - npcHRP.Position).Magnitude
+			if distance < closestDistance then
+				closestDistance = distance
+				closestCharacter = character
+			end
+		end
+	end
+	
+	return closestCharacter
+end
+
+local function isCharacterValid(character)
+	local valid = true
+	for i,v in pairs(game.Players:GetChildren()) do
+		if v:GetAttribute("Character") == character.Name then
+			valid = false
+		end
+	end
+	return valid
+end
+
+local function findCharacter()
+	local attempts = 0
+	local character = nil
+	local characters = #game.ServerStorage.Characters:GetChildren()
+	repeat 
+		character = GetRandomChild(game.ServerStorage.Characters) 
+		attempts += 1 
+		if attempts > characters then
+			break
+		end
+	until isCharacterValid(character)
+	return character
+end
+
+local function loadCharacter(plr:Player)
+	plr:SetAttribute("Dead", false)
+	local character = findCharacter()
+	local defaultCharacter = game.Players:CreateHumanoidModelFromUserId(plr.UserId)
+	local characterClone = character:Clone()
+	characterClone.Parent = workspace
+	characterClone.Name = plr.Name
+	characterClone:PivotTo(GetRandomChild(workspace.Damned.Spawns).CFrame)
+	characterClone.Humanoid.WalkSpeed = game.StarterPlayer.CharacterWalkSpeed
+	characterClone.Humanoid.JumpHeight = 0
+	characterClone.Humanoid.JumpPower = 0
+	plr.Character = characterClone
+	for i,v in pairs(game.StarterPlayer.StarterCharacterScripts:GetChildren()) do
+		local clone = v:Clone()
+		clone.Parent = characterClone
+	end
+	for i,v in pairs(defaultCharacter:GetChildren()) do
+		if v:IsA("Script") or v:IsA("LocalScript") then
+			local clone = v:Clone()
+			clone.Parent = characterClone
+		end
+	end
+	defaultCharacter:Destroy()
+	
+	plr:SetAttribute("CharacterImage", characterClone:GetAttribute("Image"))
+	plr:SetAttribute("Character", characterClone.Name)
+
+	characterClone.Humanoid.Died:Connect(function()
+		plr:SetAttribute("Dead", true)
+		Ragdoll(characterClone)
+		characterClone:Destroy()
+		
+		local pass = true
+		for i,v in pairs(game.Players:GetChildren()) do
+			if v:GetAttribute("Dead") == false then
+				pass = false
+			end
+		end
+		
+		if pass then
+			restartGame()
+		end
+	end)
+end
+
+local function plrValues(plr)
+	plr:SetAttribute("Score", 0)
+	plr:SetAttribute("Character", "")
+	plr:SetAttribute("Dead", false)
+end
+
+local gameStarted = false
+function restartGame()
+	print("🟢 [GAME] Restarting game...")
+	gameStarted = false
+	if respawnConnection then
+		coroutine.close(respawnConnection)
+	end
+	
+	killAllNPC()
+	
+	for i,v in pairs(ragdollFolder:GetChildren()) do
+		v:Destroy()
+	end
+	
+	for i,v in pairs(powerupFolder:GetChildren()) do
+		v:Destroy()
+	end
+	
+	roundsValue.Value = 0
+	zombieHealth = 150
+	zombieSpawnDelay = 4
+	amntKilled = 0
+	amntNeededToKill = 50
+	
+	-- At the top with your other local variables
+	local perksFolder = replicated:WaitForChild("Perks")
+	local standbyPerkParent = workspace:WaitForChild("Damned"):WaitForChild("InteractiveAssets")
+
+	-- Function to replace the perk
+	local function ReplacePerkModel(perkName)
+		local standbyPart = standbyPerkParent:FindFirstChild(perkName)
+		local replacementModel = perksFolder:FindFirstChild(perkName)
+
+		if standbyPart and replacementModel then
+			local newPerk = replacementModel:Clone()
+			newPerk.Parent = standbyPart.Parent
+
+			if newPerk.PrimaryPart then
+				-- Position at the same location and orientation as the original part
+				newPerk:SetPrimaryPartCFrame(standbyPart.CFrame)
+			else
+				warn("[PERK] Replacement model has no PrimaryPart set")
+			end
+
+			standbyPart:Destroy()
+			print("✅ [PERK] Replaced "..perkName.." at center with same orientation")
+		else
+			warn("[PERK] Could not replace "..perkName..": missing part or model")
+		end
+	end
+
+	-- Call this when the game starts
+	ReplacePerkModel("RapidRevive")
+
+
+	
+	for i,v in pairs(game.Players:GetChildren()) do
+		plrValues(v)
+	end
+	for i,v in pairs(game.Players:GetChildren()) do
+		loadCharacter(v)
+		gameStarted = true
+	end
+	print("✅ [GAME] Game started successfully! First round launching...")
+	nextRound()
+end
+
+game.Players.PlayerAdded:Connect(function(plr)
+	plrValues(plr)
+	
+	if gameStarted == false then
+		restartGame()
+	else
+		loadCharacter(plr)
+	end
+end)
+
+task.spawn(function()
+	while wait(0.5) do
+		for npc, setting in pairs(npcTable) do
+			if not npc or not npc.Parent or npc.Humanoid.Health <= 0 then
+				destroyNPC(npc)
+			else
+				local sounds = npc.Sounds
+				local closestCharacter = FindClosestCharacter(npc)
+				
+				npc.HumanoidRootPart.CFrame = npc.HumanoidRootPart.CFrame
+			
+				if closestCharacter then
+					if closestCharacter ~= setting.chasingCharacter then
+						visualEvent:FireAllClients("Sound", sounds.Engage, npc.HumanoidRootPart, 0.3)
+						setting.chasingCharacter = closestCharacter
+					end
+
+					setting.path:Run(closestCharacter.HumanoidRootPart)
+				end
+				
+				if setting.chasingCharacter and setting.chasingCharacter.Parent ~= workspace then
+					setting.chasingCharacter = nil
+				end
+				
+				local chasingCharacter = setting.chasingCharacter
+				if chasingCharacter and npc:FindFirstChild("HumanoidRootPart") then
+					local chasingHRP = chasingCharacter.HumanoidRootPart
+					local charDist = (chasingHRP.Position - npc.HumanoidRootPart.Position).Magnitude
+					if charDist <= setting.attackRange and setting.attackDB == false then
+						setting.animations.AttackAnimations[math.random(1, #setting.animations.AttackAnimations)]:Play()
+						setting.attackDB = true
+						chasingCharacter.Humanoid.Health -= setting.damage
+						task.delay(setting.attackDelay, function()
+							setting.attackDB = false
+						end)
+					end
+				end
+			end
+		end
+	end
+end)
