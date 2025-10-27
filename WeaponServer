@@ -1,0 +1,215 @@
+-- SERVICES
+local PS = game:GetService("PhysicsService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local eventsFolder = game.ReplicatedStorage.Events
+local WeaponsFolder = game.ReplicatedStorage.Weapons
+
+-- MODULES
+local playerInventories = require(game.ReplicatedStorage.Modules.Inventory)
+local activePowerups = require(game.ReplicatedStorage.Modules.ActivePowerups)
+
+-- EVENTS
+local event = eventsFolder.WeaponEvent
+local invEvent = eventsFolder.Inventory
+local visEvent = eventsFolder.VisualEvent
+
+-- RAYCAST PARAMS
+local params = RaycastParams.new()
+params.CollisionGroup = "Players"
+
+-- COLLISION GROUPS
+local ViewmodelsCG = "Viewmodels"
+local IgnoreVMCG = "IgnoreVM"
+PS:RegisterCollisionGroup("Viewmodels")
+PS:RegisterCollisionGroup("IgnoreVM")
+PS:RegisterCollisionGroup("Players")
+PS:RegisterCollisionGroup("Ragdolls")
+PS:CollisionGroupSetCollidable(ViewmodelsCG, IgnoreVMCG, false)
+PS:CollisionGroupSetCollidable("Players", IgnoreVMCG, false)
+PS:CollisionGroupSetCollidable("Ragdolls", "Players", false)
+
+-- MOVEMENT SETTINGS
+local WALK_SPEED = 16
+local SPRINT_SPEED = 24
+local ACCELERATION = 0.3
+local DECELERATION = 0.2
+local SLIDE_MULTIPLIER = 1.1
+
+-- Track sprint + slide state per player
+local movementStates = {} 
+-- movementStates[plr] = {isHoldingSprint = false, isSliding = false}
+
+-- SMOOTH SPEED UPDATE
+RunService.Heartbeat:Connect(function(deltaTime)
+	for plr, info in pairs(movementStates) do
+		if plr.Character and plr.Character:FindFirstChild("Humanoid") then
+			local humanoid = plr.Character.Humanoid
+			local targetSpeed = WALK_SPEED
+
+			if info.isHoldingSprint then
+				targetSpeed = SPRINT_SPEED
+			end
+			if info.isSliding then
+				targetSpeed = targetSpeed * SLIDE_MULTIPLIER
+			end
+
+			humanoid.WalkSpeed = humanoid.WalkSpeed + (targetSpeed - humanoid.WalkSpeed) * (info.isHoldingSprint and ACCELERATION or DECELERATION)
+		end
+	end
+end)
+
+-- ADD WEAPON FUNCTION
+local function AddWeapon(plr, weapon, pos)
+	local plrName = plr.Name
+	local inv = playerInventories[plrName]
+	if not pos then
+		table.insert(inv, weapon)
+	else
+		inv[pos] = weapon
+	end
+	local pos = table.find(inv, weapon)
+	inv[pos] = {}
+	inv[pos][weapon] = {}
+	local folder = WeaponsFolder:FindFirstChild(weapon)
+	if folder then
+		for i,v in pairs(folder.Configuration:GetChildren()) do
+			if not v:IsA("ObjectValue") then 
+				inv[pos][weapon][v.Name] = v.Value
+			end
+		end
+	end
+end
+
+-- GET CURRENT WEAPON TABLE
+local function GetWeaponTable(plr)
+	local inv = playerInventories[plr.Name]
+	local equipped = inv.EquippedWeapon
+	for i,v in ipairs(inv) do
+		if v[equipped] then
+			return v[equipped]
+		end
+	end
+	return nil
+end
+
+-- PLAYER ADDED
+Players.PlayerAdded:Connect(function(plr)
+	local plrName = plr.Name
+	playerInventories[plrName] = {}
+	AddWeapon(plr, "M1911", 1)
+
+	-- Initialize movement state
+	movementStates[plr] = {isHoldingSprint = false, isSliding = false}
+
+	plr.CharacterAdded:Connect(function(char)
+		AddWeapon(plr, "M1911", 1)
+		local humanoid = char:WaitForChild("Humanoid")
+		humanoid.WalkSpeed = WALK_SPEED
+
+		for i,v in pairs(char:GetDescendants()) do
+			if v:IsA("BasePart") then
+				v.CollisionGroup = "Players"
+			end
+		end
+	end)
+end)
+
+-- WEAPON & MOVEMENT EVENTS
+event.OnServerEvent:Connect(function(plr, type, a)
+	-- Weapon events
+	if type == "EquipWeapon" then
+		plr.Character:SetAttribute("EquippedWeapon", a)
+		playerInventories[plr.Name].EquippedWeapon = a
+	elseif type == "PlayAnimation" then
+		event:FireAllClients("PlayAnimation", plr, a)
+	elseif type == "StopAnimation" then
+		event:FireAllClients("StopAnimation", plr, a)
+	elseif type == "Fire" then
+		local weaponTable = GetWeaponTable(plr)
+		if weaponTable and weaponTable["CurrentMag"] > 0 then
+			weaponTable["CurrentMag"] = weaponTable["CurrentMag"]-1
+			local rayTable = a
+			local hitPart = rayTable.Instance
+			local humanoid = nil
+			local damage = weaponTable["Damage"]
+			local attackType = "Normal"
+
+			if hitPart and hitPart.Parent then 
+				humanoid = hitPart.Parent:FindFirstChild("Humanoid") or hitPart.Parent.Parent:FindFirstChild("Humanoid")
+				if hitPart.Name == "Head" then
+					damage *= 1.2
+					attackType = "Headshot"
+				end
+			end
+			if humanoid and not Players:FindFirstChild(humanoid.Parent.Name) then
+				if humanoid.Health <= 0 then return end
+				local instaKill = false
+				local scoreIncrease = 10
+
+				if humanoid:GetAttribute("Dead") == nil then
+					humanoid:SetAttribute("Dead", false)
+				end
+
+				for i,v in pairs(activePowerups) do
+					if v == "instaKill" then
+						instaKill = true
+					end
+					if v == "doublePoints" then
+						scoreIncrease *= 2
+					end
+				end
+
+				if instaKill then
+					humanoid.Health = -1
+				else
+					humanoid.Health -= damage
+				end
+
+				if humanoid.Health <= 0 and humanoid:GetAttribute("Dead") == false then
+					humanoid:SetAttribute("Dead", true)
+					scoreIncrease = (attackType == "Headshot") and 100 or 60
+				end
+				plr:SetAttribute("Score", plr:GetAttribute("Score")+scoreIncrease)
+			end
+
+			visEvent:FireAllClients("Fire", plr, rayTable)
+			if weaponTable["CurrentMag"] == 0 then
+				event:FireClient(plr, "UpdateInventory", playerInventories[plr.Name])
+			end
+		end
+	elseif type == "Reload" then
+		local weaponTable = GetWeaponTable(plr)
+		if weaponTable and weaponTable["StoredAmmo"] > 0 then
+			local remainingSpace = weaponTable["MagSize"] - weaponTable["CurrentMag"]
+			local bulletsToReload = math.min(remainingSpace, weaponTable["StoredAmmo"])
+			weaponTable["CurrentMag"] = weaponTable["CurrentMag"] + bulletsToReload
+			weaponTable["StoredAmmo"] = weaponTable["StoredAmmo"] - bulletsToReload
+		end
+
+		visEvent:FireAllClients("Reload", plr)
+		event:FireClient(plr, "UpdateInventory", playerInventories[plr.Name])
+	end
+
+	-- Movement input events
+	if type == "Sprint" then
+		movementStates[plr].isHoldingSprint = a -- true/false
+	elseif type == "Slide" then
+		movementStates[plr].isSliding = a -- true/false
+	end
+end)
+
+-- INVENTORY EVENTS
+invEvent.OnServerInvoke = function(plr, a)
+	if a == "GetInventory" then
+		return playerInventories[plr.Name]
+	elseif a == "GetAllInventory" then
+		local table = {}
+		for i,v in pairs(playerInventories) do
+			if v.EquippedWeapon then
+				table[i] = v.EquippedWeapon
+			end
+		end
+		return table
+	end
+end
