@@ -1,0 +1,139 @@
+local DataStoreService = game:GetService("DataStoreService")
+local MessagingService = game:GetService("MessagingService")
+local matchesStore = DataStoreService:GetDataStore("MatchesStore")
+local roundsValue = game.ReplicatedStorage:WaitForChild("GameData"):WaitForChild("Round")
+
+local matchesCache = {}
+
+local function initializeMatches()
+	local success, matches = pcall(function()
+		return matchesStore:GetAsync("matches")
+	end)
+
+	if not success then
+		warn("Failed to get matches: " .. tostring(matches))
+		return
+	end
+
+	matchesCache = matches or {}
+
+	for matchId, matchData in pairs(matchesCache) do
+		if matchData.ServerId ~= game.PrivateServerId then
+			matchesCache[matchId] = nil
+		end
+	end
+end
+
+initializeMatches()
+
+local function updateMatch(matchId, matchData)
+	matchesCache[matchId] = matchData
+
+	local saveSuccess, errorMessage = pcall(function()
+		matchesStore:SetAsync("matches", matchesCache)
+	end)
+
+	if not saveSuccess then
+		warn("Failed to save matches: " .. tostring(errorMessage))
+		return
+	end
+
+	local publishSuccess, publishError = pcall(function()
+		MessagingService:PublishAsync("MatchChanged", {action = "update", matchId = matchId, matchData = matchData})
+	end)
+
+	if not publishSuccess then
+		warn("Failed to publish match update: " .. tostring(publishError))
+	end
+end
+
+local function deleteMatch(matchId)
+	matchesCache[matchId] = nil
+
+	local saveSuccess, errorMessage = pcall(function()
+		matchesStore:SetAsync("matches", matchesCache)
+	end)
+
+	if not saveSuccess then
+		warn("Failed to delete match: " .. tostring(errorMessage))
+		return
+	end
+
+	local publishSuccess, publishError = pcall(function()
+		MessagingService:PublishAsync("MatchChanged", {action = "delete", matchId = matchId})
+	end)
+
+	if not publishSuccess then
+		warn("Failed to publish match deletion: " .. tostring(publishError))
+	end
+end
+
+local function playerAdded()
+	for matchId, matchData in pairs(matchesCache) do
+		if matchData.ServerId == game.PrivateServerId then
+			local newPlrTable = {}
+			for i,v in pairs(game.Players:GetChildren()) do
+				table.insert(newPlrTable, v)
+			end
+			matchData.Players = newPlrTable
+			updateMatch(matchId, matchData)
+		end
+	end
+end
+
+local function playerRemoving(player)
+	for matchId, matchData in pairs(matchesCache) do
+		if matchData.ServerId == game.PrivateServerId then
+			for index, playerId in ipairs(matchData.Players) do
+				if playerId == player.UserId then
+					table.remove(matchData.Players, index)
+					updateMatch(matchId, matchData)
+					break
+				end
+			end
+		end
+	end
+end
+
+game.Players.PlayerAdded:Connect(playerAdded)
+game.Players.PlayerRemoving:Connect(playerRemoving)
+
+game:BindToClose(function()
+	for matchId, matchData in pairs(matchesCache) do
+		if matchData.ServerId == game.PrivateServerId then
+			deleteMatch(matchId)
+		end
+	end
+end)
+
+task.spawn(function()
+	while wait(10) do
+		for matchId, matchData in pairs(matchesCache) do
+			if matchData.ServerId == game.PrivateServerId then
+				for index, playerId in ipairs(matchData.Players) do
+					local plrFound = false
+					for i,v in pairs(game.Players:GetChildren()) do
+						if v.UserId == playerId then
+							plrFound = true
+							break
+						end
+					end
+
+					if not plrFound then
+						table.remove(matchData.Players, index)
+						updateMatch(matchId, matchData)
+					end
+				end
+			end
+		end
+	end
+end)
+
+roundsValue.Changed:Connect(function()
+	for matchId, matchData in pairs(matchesCache) do
+		if matchData.ServerId == game.PrivateServerId then
+			matchData.Round = roundsValue.Value
+			updateMatch(matchId, matchData)
+		end
+	end
+end)
