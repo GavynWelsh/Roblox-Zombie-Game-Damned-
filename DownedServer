@@ -1,0 +1,83 @@
+local players = game:GetService("Players")
+local downedHealth = 400
+local defaultWalkSpeed = nil
+local bleedSpeed = 0.2
+local bleedStep = 2.3
+
+local function reviveChar(char)
+	local humanoid = char.Humanoid
+	humanoid:SetAttribute("Downed", false)
+	humanoid.Health = downedHealth+20
+	humanoid.HipHeight = 0
+end
+
+players.PlayerAdded:Connect(function(plr)
+	plr.CharacterAdded:Connect(function(character)
+		local humanoid = character.Humanoid
+		local defaultHP = humanoid.Health
+		local setHealth = defaultHP + downedHealth
+		humanoid.MaxHealth = setHealth
+		humanoid.Health = humanoid.MaxHealth
+		humanoid:SetAttribute("Downed", false)
+		
+		if not defaultWalkSpeed then
+			defaultWalkSpeed = humanoid.WalkSpeed
+		end
+		
+		local billboard = script.DownedBillboard:Clone()
+		billboard.Parent = character.Head
+		billboard.Adornee = character.Head
+		billboard.Enabled = false
+		
+		local proxPrompt = Instance.new("ProximityPrompt", character.PrimaryPart)
+		proxPrompt.ObjectText = character.Name
+		proxPrompt.ActionText = "revive"
+		proxPrompt.HoldDuration = 5
+		proxPrompt.Style = Enum.ProximityPromptStyle.Custom
+		proxPrompt.KeyboardKeyCode = Enum.KeyCode.F
+		proxPrompt:SetAttribute("InUse", "Reviving...")
+		proxPrompt.Enabled = false
+		
+		local currentlyReviving = false
+		
+		humanoid.HealthChanged:Connect(function()
+			if humanoid:GetAttribute("Downed") == true and humanoid.Health <= 0 then
+				billboard.Enabled = false
+				proxPrompt.Enabled = false
+			end
+			
+			if humanoid.Health < downedHealth and humanoid:GetAttribute("Downed") == false and humanoid.Health >= 0 then
+				billboard.Enabled = true
+				proxPrompt.Enabled = true
+				humanoid:SetAttribute("Downed", true)
+				humanoid.HipHeight = -2
+				
+				proxPrompt.Triggered:Connect(function()
+					reviveChar(character)
+					proxPrompt:Destroy()
+				end)
+				
+				proxPrompt.PromptButtonHoldBegan:Connect(function()
+					currentlyReviving = true
+				end)
+				
+				proxPrompt.PromptButtonHoldEnded:Connect(function()
+					currentlyReviving = false
+				end)
+				
+				task.spawn(function()
+					while humanoid.Health > 0 do
+						if humanoid:GetAttribute("Downed") == false then
+							billboard:Destroy()
+							break
+						end
+						if not currentlyReviving then
+							humanoid.Health -= bleedStep
+						end
+						wait(bleedSpeed)
+					end
+				end)
+			end
+		end)
+	end)
+end)
